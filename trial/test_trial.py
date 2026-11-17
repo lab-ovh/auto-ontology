@@ -291,6 +291,13 @@ def test_restore_exact_allowlist_and_read_only_role() -> None:
     assert "default_transaction_read_only = on" in statements
     assert "GRANT SELECT" in statements
     assert "GRANT ALL" not in statements
+    admin_sql = [
+        call.args[0].as_string()
+        for call in admin.execute.call_args_list
+        if hasattr(call.args[0], "as_string")
+    ]
+    assert 'REVOKE CONNECT ON DATABASE "auto_ontology" FROM PUBLIC' in admin_sql
+    assert 'REVOKE CONNECT ON DATABASE "postgres" FROM PUBLIC' in admin_sql
     copied = destination.cursor.return_value.copy.return_value.__enter__.return_value.write_row
     assert copied.call_count == 4
     assert copied.call_args.args[0] == (1, '[{"stage":"test"}]')
@@ -351,7 +358,11 @@ def test_probe_cli_offline_four_checks(
     )
     calls = []
 
-    def open_mock(request: object, timeout: int) -> io.BytesIO:
+    def open_mock(
+        opener: urllib.request.OpenerDirector,
+        request: urllib.request.Request,
+        timeout: int,
+    ) -> io.BytesIO:
         body = json.loads(request.data)
         calls.append(body)
         if (
@@ -368,7 +379,7 @@ def test_probe_cli_offline_four_checks(
             }
         return io.BytesIO(json.dumps({"choices": [{"message": message}]}).encode())
 
-    monkeypatch.setattr(probe.urllib.request, "urlopen", open_mock)
+    monkeypatch.setattr(probe.urllib.request.OpenerDirector, "open", open_mock)
     probe.main()
     assert len(calls) == 4
     output = capsys.readouterr().out

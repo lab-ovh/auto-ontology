@@ -2,12 +2,12 @@
 <!-- All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# card #1641 — board-only DeepSeek trial v1
+# card #1641 — board-only DeepSeek trial v2
 
 Fork base: NVIDIA/auto-ontology a630ebd97aa4b4410b2f41f5a8af06260af2f7b9.
 This is a patch, not an installation/readiness or compilation receipt. The
 builder must NOT start containers, restore real data, or run ontology compilation.
-Lab runs the following steps; stop on any failure. No OpenCode Go endpoint,
+Lab runs the following steps; stop on any mandatory failure. No OpenCode Go endpoint,
 header workaround, fund key, fund environment, or fund checkout is used.
 
 ## Step 0 — dedicated-key synthetic provider probe FIRST
@@ -24,9 +24,15 @@ uv run python -m trial.probe_deepseek --key-file /home/ubuntu/deepseek/.env --mo
 
 This makes four SYNTHETIC requests: strict json_schema, tool choice auto,
 forced named tool, and clean JSON content (no reasoning preamble). A strict
-schema HTTP400/422 is reported, not called a success; both tool calls and clean
-content must pass. Lab's synthetic Step0 on 2026-11-17 measured strict schemas
-HTTP400, tools/JSON content passing with thinking disabled. Therefore
+schema HTTP400/422 is reported as requiring the function-calling fallback,
+not called a schema success. Both tool calls must pass. The json_content case
+is informational when DEEPSEEK_STRUCTURED_METHOD=function_calling: application
+callers do not use json_object. It remains mandatory in json_schema mode.
+Lab initially measured JSON content passing, then malformed json_object content
+three times (including a leaked special token); the probe now prints a sanitized
+FAIL per case, continues all four, and exits nonzero for mandatory failures.
+It never echoes response bodies or exception messages. Redirects are refused,
+so credentials cannot follow a Location header. Therefore
 DEEPSEEK_STRUCTURED_METHOD defaults function_calling, DEEPSEEK_THINKING defaults
 disabled. Both are configurable; thinking enabled uses automatic tool choice.
 With the optional json_schema method, runtime retries unsupported response_format/json_schema
@@ -72,16 +78,24 @@ Post this exact allowlist on card1641 BEFORE any compile:
 NO claude_messages, claude_threads, peer_tokens, or any other table is copied.
 The newest UTC-stamped `claude_mesh.*.db.gz` under `/home/ubuntu/backups/mesh`
 is selected; lab observed `claude_mesh.20261117T031926Z.db.gz` at build time.
-If MESH_BACKUP_DIR was overridden, supply `--backup-dir` explicitly.
+If MESH_BACKUP_DIR was overridden, supply `--backup-dir` explicitly. Lab must set
+TMPDIR to a private directory on disk, not the shared tmpfs `/tmp`, before the
+restore: the extracted backup includes all source data until the allowlist copy.
 The full gzip is extracted only in a0700 temporary directory, snapshot0600,
-opened read-only, then deleted on success OR failure. Only fixed-table SELECTs
+opened read-only, then deleted on success, Python failure, SIGINT, SIGTERM and
+SIGHUP. SIGKILL/power loss cannot unwind cleanup: inspect the private TMPDIR
+and remove leftover snapshots manually before retrying. Only fixed-table SELECTs
 are issued. SQLite schema/scalars are mapped to PostgreSQL without copying
 SQLite SQL, triggers, credentials, message tables or sequences. JSON/history
 and timestamp values remain text. This is an analytical snapshot, not a live
 mesh replica; source constraints/indexes are intentionally not replayed.
 
 Set libpq PGHOST=127.0.0.1, PGPORT=55432, PGDATABASE=auto_ontology, PGUSER and
-PGPASSWORD locally (not command-line values or logs). Create a separate0600
+PGPASSWORD locally (not command-line values or logs). PGHOSTADDR, when present,
+must be exactly127.0.0.1 or::1. The script pins the connection target explicitly
+and checks libpq's actual connected address/port (not just the hostname);
+PGSERVICE cannot change it. This works with Docker port forwarding, where
+inet_server_addr() inside Postgres need not be a loopback address. Create a separate0600
 reader-password file, then:
 
 ```sh
@@ -90,11 +104,16 @@ uv run python -m trial.restore_board --reader-password-file /path/to/private/boa
 
 The script prints its table list BEFORE copying. It refuses non-localhost,
 non-sandbox admin DBs and existing `auto_ontology_board` DB/`board_reader` role;
-it NEVER overwrites or drops either. A failure after CREATE can leave a partial
-sandbox DB/role: inspect it manually, do not rerun into existing objects.
+it NEVER overwrites or drops either. Host port55432 is required by default;
+if changing the Compose mapping, explicitly pass matching --sandbox-port.
+A failure after mutation can leave a partial sandbox DB/role or CONNECT revokes:
+inspect it manually, do not rerun into existing objects.
 Only `board_reader` SELECT grants on the four tables, schema USAGE and database
-CONNECT are added; role has default_transaction_read_only=on and
-statement_timeout=10s. Do not use an admin URL for answering. Configure ONLY
+CONNECT are added. PUBLIC CONNECT is revoked on the sandbox's auto_ontology and
+postgres databases, so the reader cannot enter them; this intentionally affects
+PUBLIC grants in this fresh sandbox ONLY. Role has default_transaction_read_only=on
+and statement_timeout=10s. The timeout is a session default, not an unchangeable
+hard cap; table grants provide write isolation. Do not use an admin URL for answering. Configure ONLY
 this database in CONNECTION_STRINGS with the reader's URL-encoded password,
 in-network host `postgres:5432/auto_ontology_board`.
 

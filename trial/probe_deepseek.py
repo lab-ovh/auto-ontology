@@ -46,6 +46,21 @@ SCHEMA = {
 }
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward a credential-bearing request to a redirect target."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 def request_body(model: str, case: str) -> dict[str, Any]:
     """Use the same bare model and disabled thinking as the trial client."""
     if not model or "/" in model:
@@ -57,7 +72,11 @@ def request_body(model: str, case: str) -> dict[str, Any]:
         "messages": [
             {
                 "role": "user",
-                "content": 'Return JSON {"ok":true}. For tools, call report with ok=true.',
+                "content": (
+                    "Call report exactly once with ok=true."
+                    if case.startswith("tools_")
+                    else "Return a single JSON object with exactly one boolean field, ok, set to true. No prose, code fences or special tokens."
+                ),
             }
         ],
     }
@@ -114,9 +133,17 @@ def main() -> None:
     parser.add_argument("--key-file", type=Path, required=True)
     parser.add_argument("--model", required=True)
     args = parser.parse_args()
+    method = os.environ.get("DEEPSEEK_STRUCTURED_METHOD", "function_calling")
+    if method not in {"function_calling", "json_schema"}:
+        parser.error(
+            "DEEPSEEK_STRUCTURED_METHOD must be function_calling or json_schema"
+        )
+    request_body(args.model, "json_schema")
     key = private_value(args.key_file, deepseek_env=True)
-    schema_supported = True
+    opener = urllib.request.build_opener(NoRedirect())
+    failed = False
     for case in ("json_schema", "tools_auto", "tools_forced", "json_content"):
+        informational = case == "json_content" and method == "function_calling"
         payload = request_body(args.model, case)
         request = urllib.request.Request(
             "https://api.deepseek.com/v1/chat/completions",
@@ -127,21 +154,28 @@ def main() -> None:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with opener.open(request, timeout=60) as response:
                 data = json.load(response)
+            check_response(data, case)
         except urllib.error.HTTPError as exc:
             # Strict chat schemas may not be served; tools MUST still pass.
             if case == "json_schema" and exc.code in {400, 422}:
-                schema_supported = False
                 print("json_schema: refused; function_calling fallback required")
                 continue
-            raise RuntimeError(f"{case}: HTTP {exc.code}") from None
-        check_response(data, case)
-        print(f"{case}: PASS")
-    print(
-        "Step 0 PASS; structured method="
-        + ("json_schema" if schema_supported else "function_calling")
-    )
+            reason = f"HTTP {exc.code}"
+        except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
+            # Never print provider bodies or exception text: either may reflect a key.
+            reason = type(exc).__name__
+        else:
+            print(f"{case}: PASS" + (" [informational]" if informational else ""))
+            continue
+        failed |= not informational
+        print(
+            f"{case}: FAIL ({reason})" + (" [informational]" if informational else "")
+        )
+    print(f"Step 0 {'FAIL' if failed else 'PASS'}; structured method={method}")
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

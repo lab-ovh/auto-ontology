@@ -5,11 +5,15 @@
 
 import argparse
 import gzip
+import os
 import shutil
+import signal
 import sqlite3
 import tempfile
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
+from types import FrameType
+from typing import NoReturn
 
 import psycopg
 from psycopg import sql
@@ -19,6 +23,11 @@ from trial.probe_deepseek import private_value
 TABLES = ("board_cards", "card_obligations", "board_projects", "card_obligation_events")
 DATABASE = "auto_ontology_board"
 READER = "board_reader"
+
+
+def interrupted(signum: int, frame: FrameType | None) -> NoReturn:
+    """Unwind the private snapshot context on operator termination."""
+    raise SystemExit(128 + signum)
 
 
 def newest_backup(directory: Path) -> Path:
@@ -57,6 +66,12 @@ def restore(
         raise ValueError("trial database already exists; refusing to overwrite it")
     if admin.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (READER,)).fetchone():
         raise ValueError("trial reader role already exists; refusing to modify it")
+    for database in ("auto_ontology", "postgres"):
+        admin.execute(
+            sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(
+                sql.Identifier(database)
+            )
+        )
     admin.execute(
         sql.SQL(
             "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT"
@@ -131,16 +146,48 @@ def main() -> None:
         "--backup-dir", type=Path, default=Path("/home/ubuntu/backups/mesh")
     )
     parser.add_argument("--reader-password-file", type=Path, required=True)
+    parser.add_argument("--sandbox-port", type=int, default=55432)
     parser.add_argument("--confirm-new-sandbox", action="store_true", required=True)
     args = parser.parse_args()
+    if not 1 <= args.sandbox_port <= 65535:
+        parser.error("sandbox port must be between 1 and 65535")
     print("ONLY tables: " + ", ".join(TABLES), flush=True)
     backup = newest_backup(args.backup_dir)
     print("Source: " + backup.name, flush=True)
     password = private_value(args.reader_password_file)
-    # libpq PGHOST/PGPORT/PGUSER/PGPASSWORD address ONLY sandbox Postgres.
-    with psycopg.connect(autocommit=True) as admin:
-        if admin.info.host not in {"127.0.0.1", "localhost"}:
-            raise ValueError("restore requires sandbox Postgres on localhost")
+    host = os.environ.get("PGHOST", "127.0.0.1")
+    hostaddr = os.environ.get("PGHOSTADDR", "::1" if host == "::1" else "127.0.0.1")
+    if host not in {"127.0.0.1", "localhost", "::1"} or hostaddr not in {
+        "127.0.0.1",
+        "::1",
+    }:
+        raise ValueError("restore requires a loopback sandbox address")
+    if (
+        int(os.environ.get("PGPORT", args.sandbox_port)) != args.sandbox_port
+        or os.environ.get("PGDATABASE", "auto_ontology") != "auto_ontology"
+    ):
+        raise ValueError("restore requires the sandbox port and auto_ontology database")
+    with ExitStack() as stack:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous = signal.signal(signum, interrupted)
+            stack.callback(signal.signal, signum, previous)
+        # Explicit target parameters also prevent a PGSERVICE from changing the destination.
+        admin = stack.enter_context(
+            psycopg.connect(
+                host=host,
+                hostaddr=hostaddr,
+                port=args.sandbox_port,
+                dbname="auto_ontology",
+                autocommit=True,
+            )
+        )
+        if (
+            admin.info.hostaddr not in {"127.0.0.1", "::1"}
+            or admin.info.port != args.sandbox_port
+        ):
+            raise ValueError(
+                "connected server is not the expected loopback sandbox port"
+            )
         if admin.info.dbname != "auto_ontology":
             raise ValueError(
                 "admin connection must address sandbox auto_ontology database"
