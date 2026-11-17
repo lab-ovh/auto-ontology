@@ -21,6 +21,10 @@ applies to the same triplet.
 from __future__ import annotations
 
 import os
+from io import StringIO
+from pathlib import Path
+
+from dotenv import dotenv_values
 
 # Built-in endpoint/model defaults, selected by the triplet's API key prefix.
 # Keyed by ``<PREFIX>_<FIELD>``. API keys are intentionally absent (they have no
@@ -77,7 +81,25 @@ def _default(field: str) -> str:
 
 def _resolve_api_key(prefix: str) -> str:
     """Effective API key for *prefix* (own env var, else the shared default)."""
-    return os.environ.get(f"{prefix}_API_KEY", "") or _default("API_KEY")
+    value = os.environ.get(f"{prefix}_API_KEY", "")
+    filename = os.environ.get(f"{prefix}_API_KEY_FILE", "")
+    if value or filename:
+        return value or _key_file(filename)
+    filename = os.environ.get("DEFAULT_MODELS_API_KEY_FILE", "")
+    return _default("API_KEY") or (_key_file(filename) if filename else "")
+
+
+def _key_file(filename: str) -> str:
+    """Read a raw key or DeepSeek dotenv credential without shell evaluation."""
+    content = Path(filename).read_text().strip()
+    if "=" in content or "\n" in content:
+        value = dotenv_values(stream=StringIO(content), interpolate=False).get(
+            "DEEPSEEK_API_KEY"
+        )
+        if not value:
+            raise ValueError("credential env file has no DEEPSEEK_API_KEY")
+        return value
+    return content
 
 
 def _builtin_default(prefix: str, key: str) -> str:
@@ -97,4 +119,6 @@ def resolve(prefix: str, field: str) -> str:
     triplet's API key is an ``sk-`` or ``nvapi-`` key.
     """
     key = f"{prefix}_{field}"
+    if field == "API_KEY":
+        return _resolve_api_key(prefix)
     return os.environ.get(key, "") or _default(field) or _builtin_default(prefix, key)

@@ -12,6 +12,7 @@ import threading
 import time
 import weakref
 from typing import Iterator, Type, TypeVar
+from urllib.parse import urlsplit
 
 import requests as _requests
 from langchain_core.language_models import BaseChatModel
@@ -225,11 +226,15 @@ def _build_client(
     ``ChatOpenAI``, which supports structured output. Everything else uses
     ``ChatNVIDIA``.
     """
-    if model.startswith(("openai/", "azure/", "aws/")):
+    deepseek = urlsplit(base_url).hostname == "api.deepseek.com"
+    thinking = os.environ.get("DEEPSEEK_THINKING", "disabled")
+    if deepseek and thinking not in {"enabled", "disabled"}:
+        raise ValueError("DEEPSEEK_THINKING must be enabled or disabled")
+    if deepseek or model.startswith(("openai/", "azure/", "aws/")):
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
-            model=model,
+            model=model.rsplit("/", 1)[-1] if deepseek else model,
             api_key=api_key,
             base_url=base_url,
             # temperature omitted: gpt-5.x/o-series reject any explicit value and
@@ -239,6 +244,7 @@ def _build_client(
             max_tokens=max_tokens,
             timeout=LLM_INVOKE_TIMEOUT_S,
             max_retries=0,
+            **({"extra_body": {"thinking": {"type": thinking}}} if deepseek else {}),
         )
 
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
@@ -474,6 +480,25 @@ def _structured_output_kwargs(llm: BaseChatModel) -> dict:
     """
     if _is_claude(llm):
         return {"method": "function_calling", "tool_choice": None}
+    if (
+        urlsplit(str(getattr(llm, "openai_api_base", ""))).hostname
+        == "api.deepseek.com"
+    ):
+        method = os.environ.get("DEEPSEEK_STRUCTURED_METHOD", "function_calling")
+        if method not in {"json_schema", "function_calling"}:
+            raise ValueError(
+                "DEEPSEEK_STRUCTURED_METHOD must be json_schema or function_calling"
+            )
+        if method == "json_schema":
+            return {"method": method, "strict": True}
+        return {
+            "method": method,
+            **(
+                {"tool_choice": None}
+                if os.environ.get("DEEPSEEK_THINKING") == "enabled"
+                else {}
+            ),
+        }
     return {}
 
 
@@ -603,7 +628,34 @@ def safe_invoke_with_structured_output(
         try:
             model_llm = llm.with_structured_output(schema, **structured_kwargs)
             with _inflight_guard():
-                result = model_llm.invoke(_system_messages_first(llm, current_messages))
+                try:
+                    result = model_llm.invoke(
+                        _system_messages_first(llm, current_messages)
+                    )
+                except Exception as exc:
+                    if not (
+                        structured_kwargs.get("method") == "json_schema"
+                        and urlsplit(str(getattr(llm, "openai_api_base", ""))).hostname
+                        == "api.deepseek.com"
+                        and getattr(exc, "status_code", None) in {400, 422}
+                        and any(
+                            word in str(exc).lower()
+                            for word in ("json_schema", "response_format")
+                        )
+                    ):
+                        raise
+                    structured_kwargs = {
+                        "method": "function_calling",
+                        **(
+                            {"tool_choice": None}
+                            if os.environ.get("DEEPSEEK_THINKING") == "enabled"
+                            else {}
+                        ),
+                    }
+                    # Fallback must run even on the last ordinary retry attempt.
+                    result = llm.with_structured_output(
+                        schema, **structured_kwargs
+                    ).invoke(_system_messages_first(llm, current_messages))
         except _requests.exceptions.ReadTimeout:
             logger.error(
                 "LLM invoke timed out after %ds on attempt %d/%d for %s",

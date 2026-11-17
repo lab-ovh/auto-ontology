@@ -150,6 +150,8 @@ def _client(params: EmbedParams) -> OpenAI:
 
 
 def _text_prefix(model_name: str, input_type: InputType) -> str:
+    if model_name.split(":", 1)[0] == "nomic-embed-text":
+        return "search_query: " if input_type == "query" else "search_document: "
     if any(model in model_name for model in _TEXT_PREFIXED_MODELS):
         return f"{input_type}: "
     return ""

@@ -102,6 +102,8 @@ def is_distinct_value_probing_enabled() -> bool:
     early-stop, which is what makes them worth switching off on a large or
     metered warehouse.
     """
+    if os.environ.get("DISTINCT_VALUE_PROBING_ENABLED", "").lower() == "false":
+        return False
     return read_configuration_flag(DISTINCT_VALUE_PROBING_ENABLED_KEY, default=True)
 
 
@@ -128,6 +130,8 @@ def is_pii_detection_enabled() -> bool:
     on its own. Read per ingest, so a change applies to the next database
     without a restart.
     """
+    if os.environ.get("PII_DETECTION_ENABLED", "").lower() == "false":
+        return False
     return read_configuration_flag(PII_DETECTION_ENABLED_KEY, default=False)
 
 

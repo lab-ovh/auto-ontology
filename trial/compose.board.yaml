@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Merge with docker-compose.yml; !override removes, rather than appends, ports.
+services:
+  postgres:
+    container_name: ontology-board-postgres
+    ports: !override
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+  pgadmin:
+    profiles: [disabled-admin]
+    ports: !reset []
+  auto-ontology:
+    container_name: ontology-board-api
+    ports: !reset []
+    env_file: !override ["${TRIAL_ENV_FILE:-trial/board.env}"]
+    environment: &trial-models
+      DEFAULT_MODELS_ENDPOINT: https://api.deepseek.com/v1
+      DEFAULT_MODELS_MODEL: ${DEEPSEEK_MODEL:?set a bare non-thinking model id}
+      DEFAULT_MODELS_API_KEY_FILE: /run/secrets/deepseek_key
+      DEEPSEEK_STRUCTURED_METHOD: ${DEEPSEEK_STRUCTURED_METHOD:-function_calling}
+      DEEPSEEK_THINKING: ${DEEPSEEK_THINKING:-disabled}
+      EMBED_ENDPOINT: http://ollama:11434/v1
+      EMBED_MODEL: nomic-embed-text
+      EMBED_API_KEY: unused
+      EMBED_DIMENSIONS: "768"
+      DISTINCT_VALUE_PROBING_ENABLED: "false"
+      PII_DETECTION_ENABLED: "false"
+      PREVENT_SEMANTIC_FK_DB_QUERIES: "true"
+    secrets: [deepseek_key]
+    depends_on:
+      ollama-model:
+        condition: service_completed_successfully
+  ingestion-service:
+    container_name: ontology-board-ingestion
+    ports: !reset []
+    env_file: !override ["${TRIAL_ENV_FILE:-trial/board.env}"]
+    environment: *trial-models
+    secrets: [deepseek_key]
+    depends_on:
+      ollama-model:
+        condition: service_completed_successfully
+  auto-ontology-migrate:
+    env_file: !override ["${TRIAL_ENV_FILE:-trial/board.env}"]
+  frontend-migrate:
+    env_file: !override ["${TRIAL_ENV_FILE:-trial/board.env}"]
+  auto-ontology-frontend:
+    container_name: ontology-board-frontend
+    env_file: !override ["${TRIAL_ENV_FILE:-trial/board.env}"]
+    ports: !override
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+  ollama:
+    image: ollama/ollama:latest
+    volumes: [ollama_data:/root/.ollama]
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  ollama-model:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: [ollama]
+    command: [pull, nomic-embed-text]
+    depends_on:
+      ollama:
+        condition: service_healthy
+secrets:
+  deepseek_key:
+    file: ${DEEPSEEK_KEY_FILE:-/home/ubuntu/deepseek/.env}
+volumes:
+  ollama_data:
